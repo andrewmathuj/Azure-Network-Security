@@ -1,0 +1,37 @@
+// Detection - Azure Bastion Brute Force
+// Detects brute force / credential-guessing against Azure Bastion by flagging a high
+// number of FAILED session logins from the same source IP within a short window.
+// Data source: MicrosoftAzureBastionAuditLogs (requires the "Bastion Audit Logs"
+// diagnostic setting enabled and routed to Log Analytics).
+// Tuning profiles (lookback / threshold):
+//   Aggressive: 5m / 5   |   Balanced (recommended): 15m / 5   |   Conservative: 1h / 10
+let lookback  = 15m;
+let threshold = 5;
+let AllowlistedSourceIPs = dynamic([]);   
+MicrosoftAzureBastionAuditLogs
+| where TimeGenerated > ago(lookback)
+| where Message == "Login Failed"
+| extend UserName         = tostring(UserName),
+         UserEmail        = tostring(UserEmail),
+         SourceIP         = tostring(ClientIpAddress),
+         TargetVM         = tostring(TargetVMIPAddress),
+         TargetResourceId = tostring(TargetResourceId),
+         Protocol         = tostring(Protocol)
+| where isnotempty(SourceIP)
+| where SourceIP !in (AllowlistedSourceIPs)
+| summarize FailedAttempts    = count(),
+            DistinctTargetVMs  = dcount(TargetVM),
+            DistinctAccounts   = dcount(UserName),
+            FirstSeen          = min(TimeGenerated),
+            LastSeen           = max(TimeGenerated),
+            TargetedAccounts   = make_set(UserName, 25),
+            InitiatingUsers    = make_set(UserEmail, 25),
+            TargetVMs          = make_set(TargetVM, 25),
+            TargetResourceIds  = make_set(TargetResourceId, 25),
+            Protocols          = make_set(Protocol, 5)
+    by SourceIP
+| where FailedAttempts >= threshold
+| extend AttackWindowMinutes = datetime_diff('minute', LastSeen, FirstSeen)
+| extend LikelyPasswordSpray = DistinctAccounts >= 5
+| extend HighVolume          = FailedAttempts >= threshold * 2
+| order by FailedAttempts desc
